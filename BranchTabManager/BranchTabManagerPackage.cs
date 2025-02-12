@@ -214,7 +214,7 @@ namespace SwitchTabExtension
                         foreach (string branchFile in branchFiles)
                         {
                             // Extract the branch name from the file path
-                            string branchName = Path.GetFileName(branchFile);
+                            string branchName = branchFile.Replace(gitBranchesDir+"\\","").Replace('\\','-');
                             Console.WriteLine(branchName);
                             branchNames.Add(branchName);
                         }
@@ -270,7 +270,7 @@ namespace SwitchTabExtension
                 {
                     string branchName = headContent.Substring("ref: refs/heads/".Length);
                     Console.WriteLine($"Current branch: {branchName}");
-                    return branchName;
+                    return branchName.Replace('/','-');
                 }
                 else
                 {
