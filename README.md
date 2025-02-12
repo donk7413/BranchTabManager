@@ -38,7 +38,7 @@ The extension performs the following tasks:
 - .NET Framework (as required by the project)
 
 ## Installation (Standard Mode)
-1. **Download and install [BranchTabManager.vsix](https://pages.github.com/). **
+1. **Download and install [BranchTabManager.vsix]([https://pages.github.com/](https://github.com/donk7413/BranchTabManager/raw/54e49d1c41e27cc70bdb3d1b959f9112877f2264/BranchTabManager.vsix)). **
 
 
 ## Installation (Debug Mode)
