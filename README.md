@@ -1,6 +1,7 @@
 # Branch Tab Manager for Visual Studio 2022
 
 This VSIX extension is designed to enhance your Visual Studio development workflow by automatically managing open tabs based on your Git branches. It remembers the files you have open for each branch and restores them when you switch branches, helping you maintain a clean and focused working context.
+![Animation](https://github.com/user-attachments/assets/e620aa7c-52a3-4bd2-a71f-be1b9b89ad60)
 
 ## Overview
 
