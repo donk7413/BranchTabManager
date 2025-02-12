@@ -8,9 +8,10 @@ using Microsoft.VisualStudio.Shell;
 using EnvDTE;
 using EnvDTE80;
 using Newtonsoft.Json;
-using LibGit2Sharp;
+
 using Task = System.Threading.Tasks.Task;
 using Microsoft.VisualStudio.Shell.Interop;
+using BranchTabManager;
 
 namespace SwitchTabExtension
 {
@@ -65,19 +66,16 @@ namespace SwitchTabExtension
 
             // Setup a FileSystemWatcher to detect changes in the Git HEAD file
             // (which indicates the current branch has changed).
-            string gitDir = Path.Combine(_repoPath, ".git");
-            if (Directory.Exists(gitDir))
+            string gitHeadFile = Path.Combine(_repoPath, ".git", "HEAD");
+           
+            if (File.Exists(gitHeadFile))
             {
-                _gitHeadWatcher = new FileSystemWatcher
-                {
-                    Path = gitDir,
-                    Filter = "HEAD",
-                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size
-                };
-                _gitHeadWatcher.Changed += OnGitHeadChanged;
-                _gitHeadWatcher.Created += OnGitHeadChanged;
-                _gitHeadWatcher.EnableRaisingEvents = true;
+                var fileWatcher = new FileModificationWatcher(gitHeadFile);
+
+                fileWatcher.FileModified += OnGitHeadChanged;
+                
             }
+            
 
             // (Optional) When the solution opens, load the stored open files for the current branch.
             LoadOpenDocumentsForCurrentBranch();
@@ -152,6 +150,7 @@ namespace SwitchTabExtension
         /// </summary>
         private void LoadOpenDocumentsForCurrentBranch()
         {
+
             ThreadHelper.ThrowIfNotOnUIThread();
             try
             {
@@ -164,6 +163,13 @@ namespace SwitchTabExtension
                 {
                     string json = File.ReadAllText(filePath);
                     List<string> openFiles = JsonConvert.DeserializeObject<List<string>>(json);
+                    var docs = _dte.Documents;
+                    List<Document> savedDocs = new List<Document>();
+                    foreach (Document doc in _dte.Documents)
+                    {
+                        doc.Close(vsSaveChanges.vsSaveChangesYes);
+                    }
+                    
                     if (openFiles != null)
                     {
                         foreach (string file in openFiles)
@@ -195,13 +201,35 @@ namespace SwitchTabExtension
                 if (!Directory.Exists(_switchTabDir))
                     return;
 
-                using (var repo = new Repository(_repoPath))
+                string gitBranchesDir = Path.Combine(_solutionDir, ".git", "refs", "heads");
+                List<string> branchNames = new List<string>();
+                if (Directory.Exists(gitBranchesDir))
                 {
-                    // Get all branch names from the repo.
-                    var branchNames = repo.Branches.Select(b => b.FriendlyName)
-                                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    // Get all the branch files from the refs/heads folder
+                    string[] branchFiles = Directory.GetFiles(gitBranchesDir, "*", SearchOption.AllDirectories);
 
-                    var jsonFiles = Directory.GetFiles(_switchTabDir, "*.json");
+                    if (branchFiles.Length > 0)
+                    {
+                        Console.WriteLine("Branches:");
+                        foreach (string branchFile in branchFiles)
+                        {
+                            // Extract the branch name from the file path
+                            string branchName = Path.GetFileName(branchFile);
+                            Console.WriteLine(branchName);
+                            branchNames.Add(branchName);
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("No branches found.");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("The .git/refs/heads directory was not found.");
+                }
+
+                var jsonFiles = Directory.GetFiles(_switchTabDir, "*.json");
                     foreach (var file in jsonFiles)
                     {
                         // The file name (without extension) is used as the branch name.
@@ -212,7 +240,7 @@ namespace SwitchTabExtension
                             File.Delete(file);
                         }
                     }
-                }
+                
             }
             catch (Exception ex)
             {
@@ -225,19 +253,40 @@ namespace SwitchTabExtension
         /// </summary>
         private string GetCurrentBranchName()
         {
-            try
+                // Détermine automatiquement le chemin du dépôt Git à partir du dossier de la solution.
+                
+                string gitDir = Path.Combine(_solutionDir, ".git", "HEAD");
+
+                
+           
+
+            if (File.Exists(gitDir))
             {
-                using (var repo = new Repository(_repoPath))
+                // Read the contents of the HEAD file
+                string headContent = File.ReadAllText(gitDir).Trim();
+
+                // Extract the branch name
+                if (headContent.StartsWith("ref: refs/heads/"))
                 {
-                    return repo.Head.FriendlyName;
+                    string branchName = headContent.Substring("ref: refs/heads/".Length);
+                    Console.WriteLine($"Current branch: {branchName}");
+                    return branchName;
+                }
+                else
+                {
+                    Console.WriteLine("The HEAD file doesn't indicate a branch (detached HEAD or other state).");
+                    return null;
                 }
             }
-            catch (Exception ex)
+            else
             {
-                // Optionally log or handle errors.
+                Console.WriteLine("The .git/HEAD file was not found.");
                 return null;
             }
+
         }
+
+
 
         /// <summary>
         /// Walks upward from the given path until it finds a folder that contains a ".git" subfolder.
