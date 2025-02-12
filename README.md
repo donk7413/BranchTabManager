@@ -37,20 +37,26 @@ The extension performs the following tasks:
 - A solution located inside a Git repository
 - .NET Framework (as required by the project)
 
-## Installation
+## Installation (Standard Mode)
+1. **Download and install [BranchTabManager.vsix](https://pages.github.com/). **
 
-1. **Clone the Repository:**
-2 . **Open the Solution:**
+
+## Installation (Debug Mode)
+
+1. **Clone the Repository**
+2. **Open the Solution:**
 Open the solution in Visual Studio 2022.
-Build the Extension:
+3. **Build the Extension:**
 Build the project to produce the VSIX package.
-Run or Debug:
+4. **Run or Debug:**
 Press F5 to launch an experimental instance of Visual Studio with the extension enabled.
-Deploy:
+5. **Deploy:**
 Alternatively, locate the generated .vsix file in the output directory and install it by double-clicking the file.
-Usage
-Saving Tabs:
+
+## Usage
+
+### Saving Tabs:
 Each time you save a document, the extension updates the list of open tabs for the current branch.
 
-Restoring Tabs:
+### Restoring Tabs:
 When you switch Git branches, the extension automatically closes the open documents and restores the tabs saved for that branch.
