@@ -12,6 +12,7 @@ using Newtonsoft.Json;
 using Task = System.Threading.Tasks.Task;
 using Microsoft.VisualStudio.Shell.Interop;
 using BranchTabManager;
+using LibGit2Sharp;
 
 namespace SwitchTabExtension
 {
@@ -22,9 +23,11 @@ namespace SwitchTabExtension
     {
         private DTE2 _dte;
         private DocumentEvents _documentEvents;
+        private DTEEvents _DTEEvents;
         private string _solutionDir;
         private string _repoPath;      // Repository root (where .git exists)
         private string _switchTabDir;  // Folder to store JSON files
+        private string _currentBranch;  // Folder to store JSON files
         private FileSystemWatcher _gitHeadWatcher;
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
@@ -60,9 +63,12 @@ namespace SwitchTabExtension
                 Directory.CreateDirectory(_switchTabDir);
             }
 
-            // Subscribe to document save events.
+           
             _documentEvents = _dte.Events.DocumentEvents;
-            _documentEvents.DocumentSaved += OnDocumentSaved;
+            _DTEEvents = _dte.Events.DTEEvents;
+            _documentEvents.DocumentClosing += OnDocumentClosing;
+            _documentEvents.DocumentOpening += OnDocumentOpened;
+            _DTEEvents.OnBeginShutdown += OnIDEShutdown;
 
             // Setup a FileSystemWatcher to detect changes in the Git HEAD file
             // (which indicates the current branch has changed).
@@ -70,15 +76,17 @@ namespace SwitchTabExtension
            
             if (File.Exists(gitHeadFile))
             {
-                var fileWatcher = new FileModificationWatcher(gitHeadFile);
 
-                fileWatcher.FileModified += OnGitHeadChanged;
+                GitBranchWatcher watcher = new GitBranchWatcher(Path.Combine(_repoPath, ".git"));
+                watcher.BranchChanged += OnGitHeadChanged;  // Abonnement à l'événement
+                watcher.Start();
                 
             }
-            
+            _currentBranch = "";
+        
 
-            // (Optional) When the solution opens, load the stored open files for the current branch.
-            LoadOpenDocumentsForCurrentBranch();
+        // (Optional) When the solution opens, load the stored open files for the current branch.
+        LoadOpenDocumentsForCurrentBranch();
 
             // Clean up any .switchtab JSON files whose branch no longer exists.
             CleanupSwitchTabFiles();
@@ -88,7 +96,30 @@ namespace SwitchTabExtension
         /// Called whenever any document is saved.
         /// Saves the list of open document file paths into a JSON file for the current branch.
         /// </summary>
-        private void OnDocumentSaved(Document document)
+        private void OnDocumentClosing(Document document)
+        {
+            Task.Delay(500).ContinueWith(_ =>
+            {
+                ThreadHelper.JoinableTaskFactory.Run(async delegate
+                {
+                    await JoinableTaskFactory.SwitchToMainThreadAsync();
+                    OnIDEShutdown();
+                });
+            });
+           
+        }
+        private void OnDocumentOpened(string path, bool readOnly)
+        {
+            Task.Delay(500).ContinueWith(_ =>
+            {
+                ThreadHelper.JoinableTaskFactory.Run(async delegate
+                {
+                    await JoinableTaskFactory.SwitchToMainThreadAsync();
+                    OnIDEShutdown();
+                });
+            });
+        }
+        private void OnIDEShutdown()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             SaveOpenDocumentsForCurrentBranch();
@@ -99,7 +130,7 @@ namespace SwitchTabExtension
         /// The handler delays slightly (to let Git finish writing) then loads the stored open documents
         /// and cleans up JSON files for branches that have been deleted.
         /// </summary>
-        private void OnGitHeadChanged(object sender, FileSystemEventArgs e)
+        private void OnGitHeadChanged(string newBranch, bool isRemote)
         {
             // Delay a short time to ensure the HEAD file is fully updated.
             Task.Delay(500).ContinueWith(_ =>
@@ -122,6 +153,7 @@ namespace SwitchTabExtension
             try
             {
                 string branch = GetCurrentBranchName();
+                
                 if (string.IsNullOrEmpty(branch))
                     return;
 
@@ -133,7 +165,10 @@ namespace SwitchTabExtension
                         openFiles.Add(doc.FullName);
                     }
                 }
-
+                if (_currentBranch != branch)
+                {
+                    _currentBranch = branch;
+                }
                 string json = JsonConvert.SerializeObject(openFiles, Formatting.Indented);
                 string filePath = Path.Combine(_switchTabDir, $"{branch}.json");
                 File.WriteAllText(filePath, json);
@@ -157,27 +192,30 @@ namespace SwitchTabExtension
                 string branch = GetCurrentBranchName();
                 if (string.IsNullOrEmpty(branch))
                     return;
-
-                string filePath = Path.Combine(_switchTabDir, $"{branch}.json");
-                if (File.Exists(filePath))
+                if (_currentBranch != branch)
                 {
-                    string json = File.ReadAllText(filePath);
-                    List<string> openFiles = JsonConvert.DeserializeObject<List<string>>(json);
-                    var docs = _dte.Documents;
-                    List<Document> savedDocs = new List<Document>();
-                    foreach (Document doc in _dte.Documents)
+
+                    string filePath = Path.Combine(_switchTabDir, $"{branch}.json");
+                    if (File.Exists(filePath))
                     {
-                        doc.Close(vsSaveChanges.vsSaveChangesYes);
-                    }
-                    
-                    if (openFiles != null)
-                    {
-                        foreach (string file in openFiles)
+                        string json = File.ReadAllText(filePath);
+                        List<string> openFiles = JsonConvert.DeserializeObject<List<string>>(json);
+                        var docs = _dte.Documents;
+                        List<Document> savedDocs = new List<Document>();
+                        foreach (Document doc in _dte.Documents)
                         {
-                            if (File.Exists(file))
+                            doc.Close(vsSaveChanges.vsSaveChangesYes);
+                        }
+
+                        if (openFiles != null)
+                        {
+                            foreach (string file in openFiles)
                             {
-                                // This will open the file in the editor.
-                                _dte.ItemOperations.OpenFile(file);
+                                if (File.Exists(file))
+                                {
+                                    // This will open the file in the editor.
+                                    _dte.ItemOperations.OpenFile(file);
+                                }
                             }
                         }
                     }
