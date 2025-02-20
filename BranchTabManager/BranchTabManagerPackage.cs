@@ -68,7 +68,6 @@ namespace SwitchTabExtension
             _DTEEvents = _dte.Events.DTEEvents;
             _documentEvents.DocumentClosing += OnDocumentClosing;
             _documentEvents.DocumentOpening += OnDocumentOpened;
-            _DTEEvents.OnBeginShutdown += OnIDEShutdown;
 
             // Setup a FileSystemWatcher to detect changes in the Git HEAD file
             // (which indicates the current branch has changed).
