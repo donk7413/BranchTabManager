@@ -1,8 +1,7 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -15,8 +14,11 @@ namespace BranchTabManager
         private readonly string _remotePath;
         private string _lastHeadContent = "";
         private string _lastRemoteState = "";
-        private bool _running = false;
+        private CancellationTokenSource _cancellationTokenSource;
+        private int _pollingInterval = 1000;  // Start with 1 second polling
+        private const int MaxPollingInterval = 10000; // Maximum polling interval of 10 seconds
 
+        // Event to notify branch or remote changes
         public event Action<string, bool> BranchChanged;
 
         public GitBranchWatcher(string gitPath)
@@ -28,58 +30,64 @@ namespace BranchTabManager
 
         public void Start()
         {
+            // Initial state capture
             _lastHeadContent = GetCurrentBranch();
             _lastRemoteState = GetRemoteState();
-            Console.WriteLine("🟢 Branche actuelle : " + _lastHeadContent);
+            Console.WriteLine("🟢 Current branch: " + _lastHeadContent);
 
-            _running = true;
-            new Thread(WatchLoop).Start();
+            // Start the polling loop asynchronously
+            _cancellationTokenSource = new CancellationTokenSource();
+            Task.Run(() => WatchLoop(_cancellationTokenSource.Token));
         }
 
         public void Stop()
         {
-            _running = false;
+            _cancellationTokenSource?.Cancel();
         }
 
-        private void WatchLoop()
+        private async Task WatchLoop(CancellationToken cancellationToken)
         {
-            while (_running)
-            {
-                Thread.Sleep(500); // Vérification toutes les 500ms
+            int noChangeCycles = 0; // Count how many cycles with no change
 
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(_pollingInterval, cancellationToken); // Non-blocking wait
+
+                // Check for changes in the current branch
                 string newHead = GetCurrentBranch();
                 if (_lastHeadContent != newHead)
                 {
                     _lastHeadContent = newHead;
-                    if (BranchChanged != null)
-                        BranchChanged(newHead, false);
+                    BranchChanged?.Invoke(newHead, false); // Trigger branch change event
+                    noChangeCycles = 0; // Reset no change cycles when a change happens
+                    _pollingInterval = 1000; // Reset polling interval to default
+                }
+                else
+                {
+                    // Increase polling interval after several cycles without change
+                    noChangeCycles++;
+                    if (noChangeCycles > 3 && _pollingInterval < MaxPollingInterval)
+                    {
+                        _pollingInterval = Math.Min(_pollingInterval * 2, MaxPollingInterval); // Exponential backoff
+                    }
                 }
 
+                // Check for changes in the remote state
                 string newRemoteState = GetRemoteState();
                 if (_lastRemoteState != newRemoteState)
                 {
                     _lastRemoteState = newRemoteState;
-                    if (BranchChanged != null)
-                        BranchChanged(newRemoteState, true);
+                    BranchChanged?.Invoke(newRemoteState, true); // Trigger remote state change event
+                    noChangeCycles = 0; // Reset no change cycles when a change happens
+                    _pollingInterval = 1000; // Reset polling interval to default
                 }
             }
         }
 
         private string GetCurrentBranch()
         {
-            if (File.Exists(_headFile))
-            {
-                string headContent = File.ReadAllText(_headFile).Trim();
-                if (headContent.StartsWith("ref:"))
-                {
-                    return headContent.Substring(16); // Enlève "ref: refs/heads/"
-                }
-                else
-                {
-                    return "(HEAD détaché)";
-                }
-            }
-            return "";
+            string headContent = ReadFileContent(_headFile);
+            return headContent?.StartsWith("ref:") == true ? headContent.Substring(16) : "(Detached HEAD)";
         }
 
         private string GetRemoteState()
@@ -87,13 +95,25 @@ namespace BranchTabManager
             if (!Directory.Exists(_remotePath))
                 return "";
 
-            string[] files = Directory.GetFiles(_remotePath, "*", SearchOption.AllDirectories);
-            string remoteState = "";
-            foreach (string file in files)
-            {
-                remoteState += file + "|";
-            }
+            // Efficiently build remote state string by reading file names
+            var remoteState = string.Join("|", Directory.GetFiles(_remotePath, "*", SearchOption.AllDirectories));
             return remoteState;
+        }
+
+        private string ReadFileContent(string filePath)
+        {
+            if (File.Exists(filePath))
+            {
+                try
+                {
+                    return File.ReadAllText(filePath).Trim();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error reading file {filePath}: {ex.Message}");
+                }
+            }
+            return null;
         }
     }
 }
