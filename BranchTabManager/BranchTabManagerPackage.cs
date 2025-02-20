@@ -12,7 +12,6 @@ using Newtonsoft.Json;
 using Task = System.Threading.Tasks.Task;
 using Microsoft.VisualStudio.Shell.Interop;
 using BranchTabManager;
-using LibGit2Sharp;
 
 namespace SwitchTabExtension
 {
