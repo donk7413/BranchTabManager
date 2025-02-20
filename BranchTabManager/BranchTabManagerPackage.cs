@@ -28,6 +28,8 @@ namespace SwitchTabExtension
         private string _switchTabDir;  // Folder to store JSON files
         private string _currentBranch;  // Folder to store JSON files
         private FileSystemWatcher _gitHeadWatcher;
+        private bool _isloaded = true;
+        private bool _closeIDE = false;
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
@@ -67,7 +69,9 @@ namespace SwitchTabExtension
             _DTEEvents = _dte.Events.DTEEvents;
             _documentEvents.DocumentClosing += OnDocumentClosing;
             _documentEvents.DocumentOpening += OnDocumentOpened;
-
+            _DTEEvents.OnBeginShutdown += OnIDEShutdown;
+            _dte.Events.SolutionEvents.Opened += FirstLoad;
+            _dte.Events.SolutionEvents.BeforeClosing += SolutionUnloaded;
             // Setup a FileSystemWatcher to detect changes in the Git HEAD file
             // (which indicates the current branch has changed).
             string gitHeadFile = Path.Combine(_repoPath, ".git", "HEAD");
@@ -81,13 +85,11 @@ namespace SwitchTabExtension
                 
             }
             _currentBranch = "";
-        
 
-        // (Optional) When the solution opens, load the stored open files for the current branch.
-        LoadOpenDocumentsForCurrentBranch();
-
+           
             // Clean up any .switchtab JSON files whose branch no longer exists.
             CleanupSwitchTabFiles();
+
         }
 
         /// <summary>
@@ -96,33 +98,44 @@ namespace SwitchTabExtension
         /// </summary>
         private void OnDocumentClosing(Document document)
         {
-            Task.Delay(500).ContinueWith(_ =>
+            
+
+            Task.Delay(2000).ContinueWith(_ =>
             {
                 ThreadHelper.JoinableTaskFactory.Run(async delegate
                 {
+
                     await JoinableTaskFactory.SwitchToMainThreadAsync();
-                    OnIDEShutdown();
+                    string branch = GetCurrentBranchName();
+                    _isloaded = branch == _currentBranch;
+                    if (!_isloaded) return;
+                    SaveDocument();
                 });
             });
            
         }
         private void OnDocumentOpened(string path, bool readOnly)
         {
+            if (!_isloaded) return;
             Task.Delay(500).ContinueWith(_ =>
             {
                 ThreadHelper.JoinableTaskFactory.Run(async delegate
                 {
                     await JoinableTaskFactory.SwitchToMainThreadAsync();
-                    OnIDEShutdown();
+                    SaveDocument();
                 });
             });
         }
-        private void OnIDEShutdown()
+        private void SaveDocument()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             SaveOpenDocumentsForCurrentBranch();
         }
 
+        private void OnIDEShutdown()
+        {
+            _closeIDE = true;
+        }
         /// <summary>
         /// Called when the Git HEAD file changes. This indicates that the current branch may have changed.
         /// The handler delays slightly (to let Git finish writing) then loads the stored open documents
@@ -130,15 +143,19 @@ namespace SwitchTabExtension
         /// </summary>
         private void OnGitHeadChanged(string newBranch, bool isRemote)
         {
+            _isloaded = false;
             // Delay a short time to ensure the HEAD file is fully updated.
             Task.Delay(500).ContinueWith(_ =>
             {
-                ThreadHelper.JoinableTaskFactory.Run(async delegate
-                {
-                    await JoinableTaskFactory.SwitchToMainThreadAsync();
-                    LoadOpenDocumentsForCurrentBranch();
-                    CleanupSwitchTabFiles();
-                });
+                
+            });
+
+            ThreadHelper.JoinableTaskFactory.Run(async delegate
+            {
+                await JoinableTaskFactory.SwitchToMainThreadAsync();
+                LoadOpenDocumentsForCurrentBranch();
+                CleanupSwitchTabFiles();
+                _isloaded = true;
             });
         }
 
@@ -150,6 +167,7 @@ namespace SwitchTabExtension
             ThreadHelper.ThrowIfNotOnUIThread();
             try
             {
+               
                 string branch = GetCurrentBranchName();
                 
                 if (string.IsNullOrEmpty(branch))
@@ -176,14 +194,25 @@ namespace SwitchTabExtension
                 // Optionally log or handle errors.
             }
         }
+        private void FirstLoad()
+        {
+            _isloaded = true;
+            LoadOpenDocumentsForCurrentBranch();
+        }
 
+        private void SolutionUnloaded()
+        {
+            _isloaded = false;
+           
+
+        }
         /// <summary>
         /// If a JSON file for the current branch exists in the .switchtab folder,
         /// loads the list of file paths and opens them.
         /// </summary>
         private void LoadOpenDocumentsForCurrentBranch()
         {
-
+            
             ThreadHelper.ThrowIfNotOnUIThread();
             try
             {
@@ -192,7 +221,7 @@ namespace SwitchTabExtension
                     return;
                 if (_currentBranch != branch)
                 {
-
+                    _currentBranch = branch;
                     string filePath = Path.Combine(_switchTabDir, $"{branch}.json");
                     if (File.Exists(filePath))
                     {
