@@ -195,8 +195,6 @@ namespace SwitchTabExtension
                     }
                 }
 
-                if (openFiles.Count == 0) return; // Évite d'écraser le JSON avec une liste vide
-
                 string json = JsonConvert.SerializeObject(openFiles, Formatting.Indented);
                 string filePath = Path.Combine(_switchTabDir, $"{branch}.json");
                 File.WriteAllText(filePath, json);
