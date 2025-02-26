@@ -187,7 +187,8 @@ namespace SwitchTabExtension
                     if (window.Kind == "Document" && window.Document != null)
                     {
                         Document doc = window.Document;
-                        if (!string.IsNullOrEmpty(doc.FullName))
+                        // Vérifie si le document a une fenêtre active (évite les fichiers chargés en tâche de fond)
+                        if (!string.IsNullOrEmpty(doc.FullName) && doc.ActiveWindow != null)
                         {
                             openFiles.Add(doc.FullName);
                         }
