@@ -98,16 +98,28 @@ namespace SwitchTabExtension
                 ThreadHelper.JoinableTaskFactory.Run(async delegate
                 {
                     await JoinableTaskFactory.SwitchToMainThreadAsync();
-                    string branch = GetCurrentBranchName();
-                    _isloaded = branch == _currentBranch;
+
+                    CheckAndRefreshCurrentBranch();
+
                     if (!_isloaded) return;
                     SaveDocument();
                 });
             });
         }
 
+        private void CheckAndRefreshCurrentBranch()
+        {
+            string branch = GetCurrentBranchName();
+            _isloaded = branch == _currentBranch;
+            if (!_isloaded)
+            {
+                if (_currentBranch == "") _currentBranch = branch;
+            }
+        }
+
         private void OnDocumentOpened(string path, bool readOnly)
         {
+            CheckAndRefreshCurrentBranch();
             if (!_isloaded) return;
             Task.Delay(500).ContinueWith(_ =>
             {
@@ -171,7 +183,7 @@ namespace SwitchTabExtension
                 List<string> openFiles = new List<string>();
                 foreach (Document doc in _dte.Documents)
                 {
-                    if (!string.IsNullOrEmpty(doc.FullName))
+                    if (!string.IsNullOrEmpty(doc.FullName) && doc.ActiveWindow != null)
                     {
                         openFiles.Add(doc.FullName);
                     }
