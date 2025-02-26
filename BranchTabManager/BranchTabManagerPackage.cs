@@ -181,11 +181,16 @@ namespace SwitchTabExtension
                 }
 
                 List<string> openFiles = new List<string>();
-                foreach (Document doc in _dte.Documents)
+
+                foreach (Window window in _dte.Windows)
                 {
-                    if (!string.IsNullOrEmpty(doc.FullName) && doc.ActiveWindow != null)
+                    if (window.Kind == "Document" && window.Document != null)
                     {
-                        openFiles.Add(doc.FullName);
+                        Document doc = window.Document;
+                        if (!string.IsNullOrEmpty(doc.FullName))
+                        {
+                            openFiles.Add(doc.FullName);
+                        }
                     }
                 }
 
