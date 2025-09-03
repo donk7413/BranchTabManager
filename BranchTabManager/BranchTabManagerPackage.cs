@@ -9,16 +9,14 @@ using EnvDTE;
 using EnvDTE80;
 using Newtonsoft.Json;
 
-using Task = System.Threading.Tasks.Task;
 using Microsoft.VisualStudio.Shell.Interop;
-using BranchTabManager;
 
-namespace SwitchTabExtension
+namespace BranchTabManager
 {
     // Register the package so that it autoloads when a solution exists.
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
-    public sealed class SwitchTabPackage : AsyncPackage
+    public sealed class BranchTabManagerPackage : AsyncPackage
     {
         private DTE2 _dte;
         private DocumentEvents _documentEvents;
@@ -27,9 +25,9 @@ namespace SwitchTabExtension
         private string _repoPath;      // Repository root (where .git exists)
         private string _switchTabDir;  // Folder to store JSON files
         private string _currentBranch;  // Folder to store JSON files
-        private FileSystemWatcher _gitHeadWatcher;
-        private bool _isloaded = true;
-        private bool _closeIDE = false;
+        private GitBranchWatcher _branchWatcher;
+        private IVsActivityLog _activityLog;
+        private bool _isSwitchingBranch = false; // Flag to prevent saving while loading tabs for a new branch
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
@@ -39,6 +37,8 @@ namespace SwitchTabExtension
             _dte = await GetServiceAsync(typeof(DTE)) as DTE2;
             if (_dte == null)
                 return;
+
+            _activityLog = await GetServiceAsync(typeof(SVsActivityLog)) as IVsActivityLog;
 
             // Ensure a solution is loaded.
             if (_dte.Solution == null || string.IsNullOrEmpty(_dte.Solution.FullName))
@@ -69,19 +69,16 @@ namespace SwitchTabExtension
             _documentEvents.DocumentClosing += OnDocumentClosing;
             _documentEvents.DocumentOpening += OnDocumentOpened;
             _DTEEvents.OnBeginShutdown += OnIDEShutdown;
-            _dte.Events.SolutionEvents.Opened += FirstLoad;
-            _dte.Events.SolutionEvents.BeforeClosing += SolutionUnloaded;
-            // Setup a FileSystemWatcher to detect changes in the Git HEAD file
-            // (which indicates the current branch has changed).
-            string gitHeadFile = Path.Combine(_repoPath, ".git", "HEAD");
+            _dte.Events.SolutionEvents.Opened += OnSolutionOpened;
+            _dte.Events.SolutionEvents.BeforeClosing += OnSolutionClosing;
 
-            if (File.Exists(gitHeadFile))
-            {
-                GitBranchWatcher watcher = new GitBranchWatcher(Path.Combine(_repoPath, ".git"));
-                watcher.BranchChanged += OnGitHeadChanged;  // Abonnement à l'événement
-                watcher.Start();
-            }
-            _currentBranch = "";
+            // Setup the GitBranchWatcher to detect branch changes.
+            _branchWatcher = new GitBranchWatcher(Path.Combine(_repoPath, ".git"));
+            _branchWatcher.BranchChanged += OnBranchChanged;
+            _branchWatcher.Start();
+
+            // Initial load
+            await OnSolutionOpenedAsync();
 
             // Clean up any .switchtab JSON files whose branch no longer exists.
             CleanupSwitchTabFiles();
@@ -93,53 +90,30 @@ namespace SwitchTabExtension
         /// </summary>
         private void OnDocumentClosing(Document document)
         {
-            Task.Delay(2000).ContinueWith(_ =>
+            // Schedule the save to allow multiple documents to close before saving.
+            // Using a small delay to batch operations.
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
             {
-                ThreadHelper.JoinableTaskFactory.Run(async delegate
-                {
-                    await JoinableTaskFactory.SwitchToMainThreadAsync();
-
-                    CheckAndRefreshCurrentBranch();
-
-                    if (!_isloaded) return;
-                    SaveDocument();
-                });
+                await System.Threading.Tasks.Task.Delay(500); // Debounce
+                await JoinableTaskFactory.SwitchToMainThreadAsync();
+                await SaveOpenDocumentsForCurrentBranchAsync();
             });
-        }
-
-        private void CheckAndRefreshCurrentBranch()
-        {
-            string branch = GetCurrentBranchName();
-            _isloaded = branch == _currentBranch;
-            if (!_isloaded)
-            {
-                if (_currentBranch == "") _currentBranch = branch;
-            }
         }
 
         private void OnDocumentOpened(string path, bool readOnly)
         {
-            CheckAndRefreshCurrentBranch();
-            if (!_isloaded) return;
-            Task.Delay(500).ContinueWith(_ =>
+            // Schedule the save.
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
             {
-                ThreadHelper.JoinableTaskFactory.Run(async delegate
-                {
-                    await JoinableTaskFactory.SwitchToMainThreadAsync();
-                    SaveDocument();
-                });
+                await System.Threading.Tasks.Task.Delay(500); // Debounce
+                await JoinableTaskFactory.SwitchToMainThreadAsync();
+                await SaveOpenDocumentsForCurrentBranchAsync();
             });
-        }
-
-        private void SaveDocument()
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            SaveOpenDocumentsForCurrentBranch();
         }
 
         private void OnIDEShutdown()
         {
-            _closeIDE = true;
+            _branchWatcher?.Stop();
         }
 
         /// <summary>
@@ -147,38 +121,39 @@ namespace SwitchTabExtension
         /// The handler delays slightly (to let Git finish writing) then loads the stored open documents
         /// and cleans up JSON files for branches that have been deleted.
         /// </summary>
-        private void OnGitHeadChanged(string newBranch, bool isRemote)
+        private void OnBranchChanged(string newBranchOrState, bool isRemote)
         {
-            _isloaded = false;
-
-            Task.Delay(1000).ContinueWith(_ =>
+            // The event is fired from a background thread. Switch to the main thread.
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
             {
-                ThreadHelper.JoinableTaskFactory.Run(async delegate
+                await JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (isRemote)
                 {
-                    await JoinableTaskFactory.SwitchToMainThreadAsync();
-                    LoadOpenDocumentsForCurrentBranch();
                     CleanupSwitchTabFiles();
-                    Task.Delay(500).Wait();  // Laisser un délai pour éviter un conflit
-                    _isloaded = true;
-                });
+                }
+                else
+                {
+                    await HandleBranchChangeAsync();
+                }
             });
         }
 
         /// <summary>
         /// Saves the full paths of all open documents into a JSON file whose name is the current branch.
         /// </summary>
-        private void SaveOpenDocumentsForCurrentBranch()
+        private async Task SaveOpenDocumentsForCurrentBranchAsync()
         {
-            ThreadHelper.ThrowIfNotOnUIThread();
+            await JoinableTaskFactory.SwitchToMainThreadAsync();
+
+            // Do not save the tab list if we are in the middle of switching branches
+            if (_isSwitchingBranch) return;
+
             try
             {
-                string branch = GetCurrentBranchName();
+                string branch = await GetCurrentBranchNameAsync();
                 if (string.IsNullOrEmpty(branch)) return;
 
-                if (_currentBranch != branch)
-                {
-                    _currentBranch = branch;
-                }
+                _currentBranch = branch;
 
                 List<string> openFiles = new List<string>();
 
@@ -186,72 +161,83 @@ namespace SwitchTabExtension
                 {
                     if (window.Kind == "Document" && window.Document != null)
                     {
-                        Document doc = window.Document;
-                        // Vérifie si le document a une fenêtre active (évite les fichiers chargés en tâche de fond)
-                        if (!string.IsNullOrEmpty(doc.FullName) && doc.ActiveWindow != null)
+                        // Only save documents that are linked to a file on disk.
+                        if (!string.IsNullOrEmpty(window.Document.FullName) &&
+                            window.Document.ActiveWindow != null &&
+                            Uri.TryCreate(window.Document.FullName, UriKind.Absolute, out var uri) &&
+                            uri.IsFile)
                         {
-                            openFiles.Add(doc.FullName);
+                            openFiles.Add(window.Document.FullName);
                         }
                     }
                 }
 
                 string json = JsonConvert.SerializeObject(openFiles, Formatting.Indented);
-                string filePath = Path.Combine(_switchTabDir, $"{branch}.json");
-                File.WriteAllText(filePath, json);
+                string filePath = GetBranchFilePath(branch);
+                await WriteAllTextAsync(filePath, json);
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Error in SaveOpenDocumentsForCurrentBranch: " + ex.Message);
+                LogToActivityLog($"Error saving document list for branch '{_currentBranch}': {ex.Message}", __ACTIVITYLOG_ENTRYTYPE.ALE_ERROR);
             }
         }
 
-        private void FirstLoad()
+        private void OnSolutionOpened()
         {
-            _isloaded = true;
-            LoadOpenDocumentsForCurrentBranch();
+            _ = OnSolutionOpenedAsync();
         }
 
-        private void SolutionUnloaded()
+        private async Task OnSolutionOpenedAsync()
         {
-            _isloaded = false;
+            await JoinableTaskFactory.SwitchToMainThreadAsync();
+            _currentBranch = await GetCurrentBranchNameAsync();
+            await LoadOpenDocumentsForBranchAsync(_currentBranch);
+        }
+
+        private void OnSolutionClosing()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _ = SaveOpenDocumentsForCurrentBranchAsync();
+            _branchWatcher?.Stop();
         }
 
         /// <summary>
         /// If a JSON file for the current branch exists in the .switchtab folder,
         /// loads the list of file paths and opens them.
         /// </summary>
-        private void LoadOpenDocumentsForCurrentBranch()
+        private async Task LoadOpenDocumentsForCurrentBranchAsync()
         {
-            ThreadHelper.ThrowIfNotOnUIThread();
+            string branch = await GetCurrentBranchNameAsync();
+            await LoadOpenDocumentsForBranchAsync(branch);
+        }
+
+        private async Task LoadOpenDocumentsForBranchAsync(string branch)
+        {
+            await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
+            if (string.IsNullOrEmpty(branch)) return;
+
+            _isSwitchingBranch = true;
+            _currentBranch = branch;
+
             try
             {
-                string branch = GetCurrentBranchName();
-                if (string.IsNullOrEmpty(branch)) return;
+                string filePath = GetBranchFilePath(branch);
 
-                if (_currentBranch != branch)
+                if (File.Exists(filePath))
                 {
-                    _currentBranch = branch;  // Mise à jour correcte de la branche
-                    string filePath = Path.Combine(_switchTabDir, $"{branch}.json");
+                    string json = await ReadAllTextAsync(filePath);
+                    var openFiles = JsonConvert.DeserializeObject<List<string>>(json);
 
-                    if (File.Exists(filePath))
+                    // Close all currently open documents.
+                    _dte.Documents.CloseAll(vsSaveChanges.vsSaveChangesPrompt);
+
+                    if (openFiles != null)
                     {
-                        string json = File.ReadAllText(filePath);
-                        List<string> openFiles = JsonConvert.DeserializeObject<List<string>>(json);
-
-                        // Fermer tous les fichiers actuels avant d'ouvrir les nouveaux
-                        foreach (Document doc in _dte.Documents)
+                        foreach (string file in openFiles)
                         {
-                            doc.Close(vsSaveChanges.vsSaveChangesYes);
-                        }
-
-                        if (openFiles != null)
-                        {
-                            foreach (string file in openFiles)
+                            if (File.Exists(file))
                             {
-                                if (File.Exists(file))
-                                {
-                                    _dte.ItemOperations.OpenFile(file);
-                                }
+                                _dte.ItemOperations.OpenFile(file);
                             }
                         }
                     }
@@ -259,7 +245,11 @@ namespace SwitchTabExtension
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Error in LoadOpenDocumentsForCurrentBranch: " + ex.Message);
+                LogToActivityLog($"Error loading documents for branch '{branch}': {ex.Message}", __ACTIVITYLOG_ENTRYTYPE.ALE_ERROR);
+            }
+            finally
+            {
+                _isSwitchingBranch = false;
             }
         }
 
@@ -275,28 +265,15 @@ namespace SwitchTabExtension
                 if (!Directory.Exists(_switchTabDir))
                     return;
 
-                string gitBranchesDir = Path.Combine(_solutionDir, ".git", "refs", "heads");
+                string gitBranchesDir = Path.Combine(_repoPath, ".git", "refs", "heads");
                 List<string> branchNames = new List<string>();
                 if (Directory.Exists(gitBranchesDir))
                 {
-                    // Get all the branch files from the refs/heads folder
-                    string[] branchFiles = Directory.GetFiles(gitBranchesDir, "*", SearchOption.AllDirectories);
-
-                    if (branchFiles.Length > 0)
-                    {
-                        Console.WriteLine("Branches:");
-                        foreach (string branchFile in branchFiles)
-                        {
-                            // Extract the branch name from the file path
-                            string branchName = branchFile.Replace(gitBranchesDir + "\\", "").Replace('\\', '-');
-                            Console.WriteLine(branchName);
-                            branchNames.Add(branchName);
-                        }
-                    }
-                    else
-                    {
-                        Console.WriteLine("No branches found.");
-                    }
+                    var branchFiles = Directory.EnumerateFiles(gitBranchesDir, "*", SearchOption.AllDirectories);
+                    branchNames.AddRange(branchFiles.Select(file =>
+                        file.Substring(gitBranchesDir.Length + 1) // +1 for the path separator
+                            .Replace('\\', '/') // Normalize to forward slashes
+                    ));
                 }
                 else
                 {
@@ -306,51 +283,60 @@ namespace SwitchTabExtension
                 var jsonFiles = Directory.GetFiles(_switchTabDir, "*.json");
                 foreach (var file in jsonFiles)
                 {
-                    // The file name (without extension) is used as the branch name.
-                    string branchName = Path.GetFileNameWithoutExtension(file);
-                    if (!branchNames.Contains(branchName))
+                    string branchNameFromFile = GetBranchNameFromFileName(file);
+                    if (!branchNames.Contains(branchNameFromFile))
                     {
                         // If the branch no longer exists, delete its JSON file.
                         File.Delete(file);
+                        LogToActivityLog($"Cleaned up tab data for deleted branch: {branchNameFromFile}", __ACTIVITYLOG_ENTRYTYPE.ALE_INFORMATION);
                     }
                 }
             }
             catch (Exception ex)
             {
-                // Optionally log or handle errors.
+                LogToActivityLog($"Error during cleanup of tab files: {ex.Message}", __ACTIVITYLOG_ENTRYTYPE.ALE_WARNING);
             }
         }
 
-        /// <summary>
-        /// Opens the Git repository (via LibGit2Sharp) and returns the current branch name.
-        /// </summary>
-        private string GetCurrentBranchName()
+        private async Task HandleBranchChangeAsync()
         {
-            // Détermine automatiquement le chemin du dépôt Git à partir du dossier de la solution.
+            await JoinableTaskFactory.SwitchToMainThreadAsync();
 
-            string gitDir = Path.Combine(_solutionDir, ".git", "HEAD");
+            // Save tabs for the old branch before switching
+            await SaveOpenDocumentsForCurrentBranchAsync();
 
-            if (File.Exists(gitDir))
+            // Load tabs for the new branch
+            await LoadOpenDocumentsForCurrentBranchAsync();
+
+            CleanupSwitchTabFiles();
+        }
+
+        /// <summary>
+        /// Reads the .git/HEAD file to get the current branch name.
+        /// </summary>
+        private async Task<string> GetCurrentBranchNameAsync()
+        {
+            string headFile = Path.Combine(_repoPath, ".git", "HEAD");
+
+            if (File.Exists(headFile))
             {
                 // Read the contents of the HEAD file
-                string headContent = File.ReadAllText(gitDir).Trim();
-
+                string headContent = (await ReadAllTextAsync(headFile)).Trim();
+                const string refPrefix = "ref: refs/heads/";
                 // Extract the branch name
-                if (headContent.StartsWith("ref: refs/heads/"))
+                if (headContent.StartsWith(refPrefix))
                 {
-                    string branchName = headContent.Substring("ref: refs/heads/".Length);
-                    Console.WriteLine($"Current branch: {branchName}");
-                    return branchName.Replace('/', '-');
+                    return headContent.Substring(refPrefix.Length).Replace('\\', '/');
                 }
                 else
                 {
-                    Console.WriteLine("The HEAD file doesn't indicate a branch (detached HEAD or other state).");
-                    return null;
+                    // Handle detached HEAD state, maybe return the commit hash or a special value
+                    return "DETACHED_HEAD";
                 }
             }
             else
             {
-                Console.WriteLine("The .git/HEAD file was not found.");
+                LogToActivityLog("The .git/HEAD file was not found.", __ACTIVITYLOG_ENTRYTYPE.ALE_WARNING);
                 return null;
             }
         }
@@ -373,15 +359,49 @@ namespace SwitchTabExtension
             return null;
         }
 
+        #region Helper Methods
+
+        private string GetBranchFilePath(string branchName)
+        {
+            // Replace invalid file path characters from branch name.
+            string safeFileName = $"{branchName.Replace('/', '-')}.json";
+            return Path.Combine(_switchTabDir, safeFileName);
+        }
+
+        private string GetBranchNameFromFileName(string filePath)
+        {
+            // Convert the file name back to the original branch name.
+            return Path.GetFileNameWithoutExtension(filePath).Replace('-', '/');
+        }
+
+        private void LogToActivityLog(string message, __ACTIVITYLOG_ENTRYTYPE type)
+        {
+            _activityLog?.LogEntry((uint)type, "BranchTabManager", message);
+        }
+
+        private static async Task<string> ReadAllTextAsync(string filePath)
+        {
+            using (var reader = new StreamReader(filePath))
+            {
+                return await reader.ReadToEndAsync();
+            }
+        }
+
+        private static async Task WriteAllTextAsync(string filePath, string content)
+        {
+            using (var writer = new StreamWriter(filePath, false)) // false to overwrite
+            {
+                await writer.WriteAsync(content);
+            }
+        }
+
+        #endregion
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                if (_gitHeadWatcher != null)
-                {
-                    _gitHeadWatcher.Dispose();
-                    _gitHeadWatcher = null;
-                }
+                _branchWatcher?.Stop();
             }
             base.Dispose(disposing);
         }
