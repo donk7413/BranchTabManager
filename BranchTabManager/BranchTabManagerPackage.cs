@@ -1,3 +1,7 @@
+extern alias EnvDTE;
+extern alias EnvDTE80;
+extern alias Interop;
+
 using System;
 using System.IO;
 using System.Linq;
@@ -5,11 +9,21 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.Shell;
-using EnvDTE;
-using EnvDTE80;
 using Newtonsoft.Json;
 
-using Microsoft.VisualStudio.Shell.Interop;
+using EnvDTE80 = EnvDTE80.DTE2;
+using EnvDTE = EnvDTE.DTE;
+using Document = EnvDTE.Document;
+using DocumentEvents = EnvDTE.DocumentEvents;
+using DTEEvents = EnvDTE.DTEEvents;
+using SolutionEvents = EnvDTE.SolutionEvents;
+using vsSaveChanges = EnvDTE.vsSaveChanges;
+
+using IVsActivityLog = Interop.Microsoft.VisualStudio.Shell.Interop.IVsActivityLog;
+using SVsActivityLog = Interop.Microsoft.VisualStudio.Shell.Interop.SVsActivityLog;
+using UIContextGuids80 = Interop.Microsoft.VisualStudio.Shell.Interop.UIContextGuids80;
+using __ACTIVITYLOG_ENTRYTYPE = Interop.Microsoft.VisualStudio.Shell.Interop.__ACTIVITYLOG_ENTRYTYPE;
+
 
 namespace BranchTabManager
 {
@@ -18,7 +32,7 @@ namespace BranchTabManager
     [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
     public sealed class BranchTabManagerPackage : AsyncPackage, IAsyncDisposable
     {
-        private DTE2 _dte;
+        private EnvDTE80 _dte;
         private DocumentEvents _documentEvents;
         private DTEEvents _DTEEvents;
         private SolutionEvents _solutionEvents;
@@ -37,7 +51,7 @@ namespace BranchTabManager
             // Switch to the UI thread as we’ll be calling DTE APIs.
             await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
 
-            _dte = await GetServiceAsync(typeof(DTE)) as DTE2;
+            _dte = await GetServiceAsync(typeof(EnvDTE)) as EnvDTE80;
             if (_dte == null)
                 return;
 
@@ -113,7 +127,7 @@ namespace BranchTabManager
 
             _ = Task.Delay(500, _saveDebounceTokenSource.Token).ContinueWith(async t =>
             {
-                if (t.IsCompletedSuccessfully)
+                if (!t.IsFaulted && !t.IsCanceled)
                 {
                     await SaveOpenDocumentsForCurrentBranchAsync();
                 }

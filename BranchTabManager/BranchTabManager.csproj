@@ -77,12 +77,18 @@
     </PackageReference>
     <PackageReference Include="EnvDTE">
       <Version>8.0.2</Version>
+      <Aliases>EnvDTE</Aliases>
+      <EmbedInteropTypes>False</EmbedInteropTypes>
     </PackageReference>
     <PackageReference Include="EnvDTE80">
       <Version>8.0.3</Version>
+      <Aliases>EnvDTE80</Aliases>
+      <EmbedInteropTypes>False</EmbedInteropTypes>
     </PackageReference>
     <PackageReference Include="Microsoft.VisualStudio.Shell.Interop">
       <Version>17.12.40392</Version>
+      <Aliases>Interop</Aliases>
+      <EmbedInteropTypes>False</EmbedInteropTypes>
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
