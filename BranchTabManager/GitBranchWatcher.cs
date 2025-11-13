@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -12,93 +11,94 @@ namespace BranchTabManager
         private readonly string _gitPath;
         private readonly string _headFile;
         private readonly string _remotePath;
-        private string _lastHeadContent = "";
-        private string _lastRemoteState = "";
-        private CancellationTokenSource _cancellationTokenSource;
-        private int _pollingInterval = 1000;  // Start with 1 second polling
-        private const int MaxPollingInterval = 10000; // Maximum polling interval of 10 seconds
+        private FileSystemWatcher _headWatcher;
+        private Timer _remoteWatcherTimer;
+        private string _lastHeadContent;
+        private string _lastRemoteState;
 
-        // Event to notify branch or remote changes
         public event Action<string, bool> BranchChanged;
 
         public GitBranchWatcher(string gitPath)
         {
             _gitPath = gitPath;
             _headFile = Path.Combine(_gitPath, "HEAD");
-            _remotePath = Path.Combine(_gitPath, "refs", "remotes", "origin");
+            _remotePath = Path.Combine(_gitPath, "refs", "remotes");
         }
 
         public void Start()
         {
-            // Initial state capture
             _lastHeadContent = GetCurrentBranch();
             _lastRemoteState = GetRemoteState();
-            Console.WriteLine("🟢 Current branch: " + _lastHeadContent);
 
-            // Start the polling loop asynchronously
-            _cancellationTokenSource = new CancellationTokenSource();
-            _ = Task.Run(() => WatchLoopAsync(_cancellationTokenSource.Token));
+            _headWatcher = new FileSystemWatcher(Path.GetDirectoryName(_headFile), Path.GetFileName(_headFile));
+            _headWatcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName;
+            _headWatcher.Changed += OnHeadChanged;
+            _headWatcher.Created += OnHeadChanged;
+            _headWatcher.Renamed += OnHeadChanged;
+            _headWatcher.EnableRaisingEvents = true;
+
+            _remoteWatcherTimer = new Timer(CheckRemoteState, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
         }
 
         public void Stop()
         {
-            if (_cancellationTokenSource != null && !_cancellationTokenSource.IsCancellationRequested)
+            if (_headWatcher != null)
             {
-                _cancellationTokenSource.Cancel();
-                _cancellationTokenSource.Dispose();
-                _cancellationTokenSource = null;
+                _headWatcher.EnableRaisingEvents = false;
+                _headWatcher.Dispose();
+                _headWatcher = null;
+            }
+
+            if (_remoteWatcherTimer != null)
+            {
+                _remoteWatcherTimer.Dispose();
+                _remoteWatcherTimer = null;
             }
         }
 
-        private async Task WatchLoopAsync(CancellationToken cancellationToken)
+        private void OnHeadChanged(object sender, FileSystemEventArgs e)
         {
-            int noChangeCycles = 0; // Count how many cycles with no change
-
-            try
+            Task.Delay(100).ContinueWith(_ =>
             {
-                while (!cancellationToken.IsCancellationRequested)
+                var newHead = GetCurrentBranch();
+                if (newHead != _lastHeadContent)
                 {
-                    await Task.Delay(_pollingInterval, cancellationToken);
-
-                    bool changed = CheckForChanges();
-
-                    if (changed)
-                    {
-                        noChangeCycles = 0;
-                        _pollingInterval = 1000; // Reset polling interval to default
-                    }
-                    else
-                    {
-                        // Increase polling interval after several cycles without change (exponential backoff)
-                        noChangeCycles++;
-                        if (noChangeCycles > 3 && _pollingInterval < MaxPollingInterval)
-                        {
-                            _pollingInterval = Math.Min(_pollingInterval * 2, MaxPollingInterval);
-                        }
-                    }
+                    _lastHeadContent = newHead;
+                    BranchChanged?.Invoke(newHead, false);
                 }
-            }
-            catch (OperationCanceledException)
+            });
+        }
+
+        private void CheckRemoteState(object state)
+        {
+            var newRemoteState = GetRemoteState();
+            if (newRemoteState != _lastRemoteState)
             {
-                // Expected when Stop() is called, so we can ignore it.
-            }
-            catch (Exception ex)
-            {
-                // Log any other unexpected error to prevent the watcher from crashing silently.
-                Console.WriteLine($"🔴 Error in GitBranchWatcher loop: {ex.Message}");
+                _lastRemoteState = newRemoteState;
+                BranchChanged?.Invoke(null, true);
             }
         }
 
         private string GetCurrentBranch()
         {
-            string headContent = ReadFileContent(_headFile);
-            const string refPrefix = "ref: refs/heads/";
-            if (headContent?.StartsWith(refPrefix) == true)
+            try
             {
-                // Retourne le chemin relatif de la branche, ex: "main" ou "feature/my-feature"
-                return headContent.Substring(refPrefix.Length);
+                if (File.Exists(_headFile))
+                {
+                    var headContent = File.ReadAllText(_headFile).Trim();
+                    const string refPrefix = "ref: refs/heads/";
+                    if (headContent.StartsWith(refPrefix))
+                    {
+                        return headContent.Substring(refPrefix.Length);
+                    }
+                    return "(Detached HEAD)";
+                }
             }
-            return "(Detached HEAD)";
+            catch (Exception ex)
+            {
+                Console.WriteLine($"🔴 Error reading git HEAD file: {ex.Message}");
+            }
+            return null;
         }
 
         private string GetRemoteState()
@@ -108,60 +108,17 @@ namespace BranchTabManager
 
             try
             {
-                // Build a state string from remote branch names and their commit hashes.
-                // This detects new/deleted branches and updates to existing branches.
                 var remoteFiles = Directory.EnumerateFiles(_remotePath, "*", SearchOption.AllDirectories)
-                                           .OrderBy(f => f); // Sort for consistent order
+                                           .OrderBy(f => f);
 
-                var remoteStateParts = remoteFiles.Select(file => $"{file.Replace(_remotePath + Path.DirectorySeparatorChar, "")}:{ReadFileContent(file)}");
+                var remoteStateParts = remoteFiles.Select(file => $"{file.Replace(_remotePath + Path.DirectorySeparatorChar, "")}:{File.ReadAllText(file).Trim()}");
                 return string.Join(";", remoteStateParts);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"🔴 Error getting remote state: {ex.Message}");
-                return ""; // Return empty string on error to avoid crash loops
+                return "";
             }
-        }
-
-        private string ReadFileContent(string filePath)
-        {
-            if (File.Exists(filePath))
-            {
-                try
-                {
-                    return File.ReadAllText(filePath).Trim();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"🔴 Error reading file {filePath}: {ex.Message}");
-                }
-            }
-            return null;
-        }
-
-        private bool CheckForChanges()
-        {
-            bool hasChanged = false;
-
-            // Check for changes in the current branch (HEAD)
-            string newHead = GetCurrentBranch();
-            if (_lastHeadContent != newHead)
-            {
-                _lastHeadContent = newHead;
-                BranchChanged?.Invoke(newHead, false);
-                hasChanged = true;
-            }
-
-            // Check for changes in the remote state
-            string newRemoteState = GetRemoteState();
-            if (_lastRemoteState != newRemoteState)
-            {
-                _lastRemoteState = newRemoteState;
-                BranchChanged?.Invoke(null, true); // The specific state isn't needed, just the notification.
-                hasChanged = true;
-            }
-
-            return hasChanged;
         }
 
         public void Dispose()
