@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
     <Metadata>
-        <Identity Id="BranchTabManager.cbdea9a6-0fd2-4429-8837-77f093bb0642" Version="1.4.0" Language="en-US" Publisher="Romain CHEVALLIER" />
+        <Identity Id="BranchTabManager.cbdea9a6-0fd2-4429-8837-77f093bb0642" Version="1.6.6" Language="en-US" Publisher="Romain CHEVALLIER" />
         <DisplayName>BranchTabManager</DisplayName>
         <Description xml:space="preserve">This VSIX extension is designed to enhance your Visual Studio development workflow by automatically managing open tabs based on your Git branches. It remembers the files you have open for each branch and restores them when you switch branches, helping you maintain a clean and focused working context.</Description>
         <Icon>Branch Tab Manager.png</Icon>
